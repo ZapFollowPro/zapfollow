@@ -1,202 +1,215 @@
-import telebot
 import os
+import asyncio
 import sqlite3
-import time
-import threading
 import urllib.parse
+import secrets
+import logging
 from datetime import datetime, timedelta
+from fastapi import FastAPI, Request, HTTPException
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Configurações Iniciais
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    print("ERRO: Variável BOT_TOKEN não configurada!")
-    exit()
+# --- CONFIGURAÇÕES DE AMBIENTE ---
+TOKEN = "8614152444:AAExDqoXFSioKso4fJCSqOtdv_awYhlOj10"
+ADMIN_ID = 8449316389
+# O Railway define RAILWAY_STATIC_URL automaticamente
+BASE_URL = os.getenv("RAILWAY_STATIC_URL", "seu-app.up.railway.app")
 
-bot = telebot.TeleBot(TOKEN)
-ADMIN_ID = 8449316389  # Seu ID para liberar premium
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+app = FastAPI()
 
-# --- BANCO DE DADOS ---
-# Se usar Volumes no Railway, mude para 'data/bot.db'
-DB_PATH = "bot.db"
+# --- BANCO DE DADOS (Persistência de Elite) ---
+DB_PATH = "zapfollow_pro.db"
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    return conn
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        chat_id INTEGER PRIMARY KEY,
+        premium INTEGER DEFAULT 0,
+        webhook_token TEXT UNIQUE,
+        vendas_recuperadas INTEGER DEFAULT 0,
+        total_leads INTEGER DEFAULT 0
+    )""")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        phone TEXT,
+        name TEXT,
+        due TEXT,
+        product TEXT,
+        platform TEXT,
+        status TEXT DEFAULT 'pending'
+    )""")
+    conn.commit()
+    conn.close()
 
-conn = get_db_connection()
-cursor = conn.cursor()
+init_db()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    chat_id INTEGER PRIMARY KEY,
-    premium INTEGER DEFAULT 0,
-    reminders_count INTEGER DEFAULT 0
-)
-""")
+# --- NÚCLEO DE RECEPÇÃO (WEBHOOKS) ---
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER,
-    phone TEXT,
-    name TEXT,
-    due TEXT
-)
-""")
-conn.commit()
-
-# --- FUNÇÕES AUXILIARES ---
-
-def get_user(chat_id):
-    cursor.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+@app.post("/webhook/{token}")
+async def dynamic_webhook(token: str, request: Request):
+    data = await request.json()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_id FROM users WHERE webhook_token=?", (token,))
     user = cursor.fetchone()
+    
     if not user:
-        cursor.execute("INSERT INTO users (chat_id) VALUES (?)", (chat_id,))
-        conn.commit()
-        return (chat_id, 0, 0)
-    return user
+        conn.close()
+        raise HTTPException(status_code=404)
 
-# --- COMANDOS DO BOT ---
+    chat_id = user[0]
+    
+    # Normalização de Dados (Aceita Kiwify, Hotmart e outros)
+    name = data.get("customer_name") or data.get("name") or "Lead"
+    phone = str(data.get("customer_mobile") or data.get("phone") or "").replace("+", "").replace(" ", "")
+    product = data.get("product_name") or data.get("product") or "Infoproduto"
+    status = data.get("order_status") or data.get("status")
 
-@bot.message_handler(commands=['start'])
-def start(msg):
-    get_user(msg.chat.id)
-    text = (
-        "🚀 *ZapFollow Pro - Edição Afiliados*\n\n"
-        "Transforme seus leads em vendas com follow-up pontual.\n\n"
-        "📌 *Comandos Principais:*\n"
-        "1️⃣ `/lembrar telefone Nome Dias` \n"
-        "   _Ex: /lembrar 5511999998888 João 1_\n\n"
-        "2️⃣ `/lista` - Veja todos os seus agendamentos ativos.\n"
-        "3️⃣ `/id` - Veja seu código de identificação.\n"
-        "4️⃣ `/assinar` - Libere lembretes ilimitados."
-    )
-    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
-
-@bot.message_handler(commands=['id'])
-def id_user(msg):
-    bot.reply_to(msg, f"🆔 Seu ID: `{msg.chat.id}`", parse_mode="Markdown")
-
-@bot.message_handler(commands=['lembrar'])
-def lembrar(msg):
-    user = get_user(msg.chat.id)
-    is_premium = user[1]
-    count = user[2]
-
-    # Trava de segurança para usuários grátis
-    if not is_premium and count >= 5:
-        text = (
-            "🚫 *Limite Grátis Atingido*\n\n"
-            "Afiliados Pro não perdem vendas por falta de organização.\n"
-            "Assine o plano ilimitado com `/assinar`."
-        )
-        bot.send_message(msg.chat.id, text, parse_mode="Markdown")
-        return
-
-    try:
-        parts = msg.text.split(maxsplit=3)
-        phone = parts[1].replace("+", "").replace("-", "").replace(" ", "")
-        name = parts[2]
-        days = int(parts[3])
-
-        due_date = datetime.now() + timedelta(days=days)
-        due_str = due_date.strftime("%Y-%m-%d %H:%M")
-
+    # Gatilhos de Follow-up (Boleto/Pix)
+    if status in ["waiting_payment", "pending", "status_pending", "billet_printed"]:
+        due_time = (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+        
         cursor.execute(
-            "INSERT INTO reminders (chat_id, phone, name, due) VALUES (?, ?, ?, ?)",
-            (msg.chat.id, phone, name, due_str)
+            "INSERT INTO reminders (chat_id, phone, name, due, product, platform) VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, phone, name, due_time, product, "Plataforma Digital")
         )
-        cursor.execute("UPDATE users SET reminders_count = reminders_count + 1 WHERE chat_id=?", (msg.chat.id,))
+        cursor.execute("UPDATE users SET total_leads = total_leads + 1 WHERE chat_id=?", (chat_id,))
         conn.commit()
 
-        bot.reply_to(msg, f"✅ *Sucesso!* Vou te avisar para chamar o(a) *{name}* no dia {due_date.strftime('%d/%m')}.", parse_mode="Markdown")
+        await bot.send_message(
+            chat_id,
+            f"🎯 *Novo Lead Detectado!*\n\n👤 *Nome:* {name}\n📦 *Produto:* {product}\n📱 *Zap:* `{phone}`\n\n"
+            "⏰ Vou te avisar em 1 hora para você não deixar o lead esfriar!",
+            parse_mode="Markdown"
+        )
 
-    except:
-        bot.reply_to(msg, "❌ *Erro de formato!*\nUse: `/lembrar Telefone Nome Dias`", parse_mode="Markdown")
+    conn.close()
+    return {"status": "ok"}
 
-@bot.message_handler(commands=['lista'])
-def lista_pendentes(msg):
-    cursor.execute("SELECT name, phone, due FROM reminders WHERE chat_id=? ORDER BY due ASC", (msg.chat.id,))
-    rows = cursor.fetchall()
+# --- INTERFACE DO TELEGRAM ---
+
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    chat_id = message.chat.id
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT webhook_token FROM users WHERE chat_id=?", (chat_id,))
+    row = cursor.fetchone()
     
-    if not rows:
-        bot.send_message(msg.chat.id, "📭 *Você não tem lembretes agendados.*", parse_mode="Markdown")
-        return
-
-    texto = "📋 *Seus próximos Follow-ups:*\n\n"
-    for r in rows:
-        # Formata a data de YYYY-MM-DD para DD/MM
-        data_formatada = datetime.strptime(r[2], "%Y-%m-%d %H:%M").strftime("%d/%m às %H:%M")
-        texto += f"🔹 *{r[0]}* ({r[1]}) - {data_formatada}\n"
+    if not row:
+        token = secrets.token_hex(8)
+        cursor.execute("INSERT INTO users (chat_id, webhook_token, total_leads, vendas_recuperadas) VALUES (?, ?, 0, 0)", (chat_id, token))
+        conn.commit()
+    else:
+        token = row[0]
+    conn.close()
     
-    bot.send_message(msg.chat.id, texto, parse_mode="Markdown")
-
-@bot.message_handler(commands=['assinar'])
-def assinar(msg):
+    url = f"https://{BASE_URL}/webhook/{token}"
     text = (
-        "💎 *ZapFollow Premium*\n\n"
-        "Garanta que 100% dos seus boletos gerados recebam um contato seu.\n\n"
-        "✅ Lembretes Ilimitados\n"
-        "✅ Suporte via Chat\n"
-        "✅ Função /lista liberada\n\n"
-        "💰 *Apenas R$ 19,90/mês*\n\n"
-        "🔑 *Chave Pix:* `44999648254` \n\n"
-        "Envie o comprovante e seu ID para o suporte após o pagamento."
+        "✨ *ZapFollow Enterprise v2026*\n\n"
+        "Seu Webhook Universal para Kiwify/Hotmart:\n"
+        f"`{url}`\n\n"
+        "📊 `/dashboard` - Ver suas métricas\n"
+        "📋 `/lista` - Leads pendentes\n"
+        "💎 `/assinar` - Plano Ilimitado"
     )
-    bot.send_message(msg.chat.id, text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="Markdown")
 
-@bot.message_handler(commands=['liberar'])
-def liberar(msg):
-    if msg.chat.id != ADMIN_ID:
-        return
+@dp.message(Command("dashboard"))
+async def cmd_dashboard(message: Message):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT total_leads, vendas_recuperadas FROM users WHERE chat_id=?", (message.chat.id,))
+    stats = cursor.fetchone()
+    conn.close()
 
-    try:
-        user_id = int(msg.text.split()[1])
-        cursor.execute("UPDATE users SET premium=1 WHERE chat_id=?", (user_id,))
-        conn.commit()
-        bot.send_message(user_id, "✨ *Sua conta foi atualizada para PREMIUM!*\nBoas vendas!", parse_mode="Markdown")
-        bot.reply_to(msg, f"✅ Usuário {user_id} liberado!")
-    except:
-        bot.reply_to(msg, "❌ Use: `/liberar ID_DO_USUARIO`", parse_mode="Markdown")
+    if stats:
+        conv = (stats[1]/stats[0]*100) if stats[0] > 0 else 0
+        text = (
+            "📊 *Seu Painel de Performance*\n\n"
+            f"🔥 *Leads Capturados:* {stats[0]}\n"
+            f"💰 *Vendas Recuperadas:* {stats[1]}\n"
+            f"📈 *Taxa de Conversão:* {conv:.1f}%"
+        )
+        await message.answer(text, parse_mode="Markdown")
 
-# --- LOOP DE VERIFICAÇÃO (Thread) ---
+@dp.message(Command("lista"))
+async def cmd_lista(message: Message):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name, product, due, id FROM reminders WHERE chat_id=? AND status='pending' ORDER BY due ASC", (message.chat.id,))
+    rows = cursor.fetchall()
+    conn.close()
 
-def check_reminders():
+    if not rows:
+        return await message.answer("📭 Sem leads pendentes.")
+
+    lista = "📋 *Leads Aguardando Follow-up:*\n\n"
+    for r in rows:
+        lista += f"🔹 *{r[0]}* - {r[1]} ({r[2]})\n"
+    await message.answer(lista, parse_mode="Markdown")
+
+# --- LÓGICA DE MARCAR VENDA (ROI) ---
+
+@dp.callback_query(F.data.startswith("win_"))
+async def mark_win(callback: types.CallbackQuery):
+    reminder_id = callback.data.split("_")[1]
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET vendas_recuperadas = vendas_recuperadas + 1 WHERE chat_id=?", (callback.from_user.id,))
+    cursor.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+    conn.commit()
+    conn.close()
+    await callback.message.edit_text("✅ *Venda marcada com sucesso! Parabéns!* 🎉", parse_mode="Markdown")
+
+# --- MOTOR DE AGENDAMENTO (SCHEDULER) ---
+
+async def main_scheduler():
     while True:
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            cursor.execute("SELECT * FROM reminders WHERE due <= ?", (now,))
-            rows = cursor.fetchall()
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reminders WHERE due <= ? AND status='pending'", (now,))
+            expired = cursor.fetchall()
 
-            for r in rows:
-                rid, chat_id, phone, name = r[0], r[1], r[2], r[3]
+            for r in expired:
+                rid, chat_id, phone, name, due, product, platform, status = r
+                copy = f"Olá {name}! Notei que você iniciou a inscrição para o {product} mas não concluiu. Ficou com alguma dúvida?"
+                link = f"https://wa.me/{phone}?text={urllib.parse.quote(copy)}"
                 
-                # Mensagem padrão para o afiliado enviar ao cliente
-                msg_whatsapp = f"Olá {name}, tudo bem? Notei que você se interessou pelo treinamento mas não concluiu a inscrição. Ficou com alguma dúvida?"
-                encoded_msg = urllib.parse.quote(msg_whatsapp)
-                link = f"https://wa.me/{phone}?text={encoded_msg}"
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 Chamar no WhatsApp", url=link)],
+                    [InlineKeyboardButton(text="💰 Marcar como Vendido", callback_data=f"win_{rid}")]
+                ])
 
-                text = (
-                    f"🔔 *HORA DO FOLLOW-UP!*\n\n"
-                    f"👤 *Cliente:* {name}\n"
-                    f"📱 *Zap:* `{phone}`\n\n"
-                    f"👉 [CLIQUE AQUI PARA CHAMAR NO ZAP]({link})"
-                )
-                
-                bot.send_message(chat_id, text, parse_mode="Markdown", disable_web_page_preview=True)
-                
-                # Deleta após avisar
-                cursor.execute("DELETE FROM reminders WHERE id=?", (rid,))
+                await bot.send_message(chat_id, f"⏰ *HORA DO FOLLOW-UP!*\n\nCliente: *{name}*\nProduto: *{product}*", reply_markup=kb, parse_mode="Markdown")
+                cursor.execute("UPDATE reminders SET status='notified' WHERE id=?", (rid,))
                 conn.commit()
+            conn.close()
         except Exception as e:
-            print(f"Erro no loop de lembretes: {e}")
-        
-        time.sleep(40) # Checa a cada 40 segundos
+            print(f"Erro: {e}")
+        await asyncio.sleep(40)
 
-# Iniciar Thread de Segundo Plano
-threading.Thread(target=check_reminders, daemon=True).start()
+# --- STARTUP INTEGRADO ---
 
-# Iniciar o Bot
-print("🚀 ZapFollow Pro está online!")
-bot.infinity_polling()
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(main_scheduler())
+    await bot.set_webhook(url=f"https://{BASE_URL}/tg-bot")
+
+@app.post("/tg-bot")
+async def bot_webhook(request: Request):
+    update = types.Update(**await request.json())
+    await dp.feed_update(bot, update)
+    return {"ok": True}
+
 
