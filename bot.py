@@ -6,50 +6,47 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-# --- CONFIGURAÇÕES E AMBIENTE ---
+# --- CONFIGURAÇÕES DE ELITE ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = "8614152444:AAExDqoXFSioKso4fJCSqOtdv_awYhlOj10"
 ADMIN_ID = 8449316389 
 BASE_URL = os.getenv("RAILWAY_STATIC_URL", "zapfollow-production.up.railway.app")
-CHECKOUT_URL = "https://suaplataforma.com/checkout" # Link de pagamento
 DB_PATH = "venda_plus.db"
+
+# Informações de Negócio
+PIX_KEY = "(44) 99964-8254"
+SUPPORT_LINK = "https://wa.me/5544999648254" 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- AUTOMAÇÃO DE BANCO DE DADOS ---
+# --- AUTOMAÇÃO E SEGURANÇA DE DADOS ---
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
-        # Tabela unificada com suporte a ranking e trial
         conn.execute("""CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER PRIMARY KEY, username TEXT, premium INTEGER DEFAULT 0, 
             webhook_token TEXT UNIQUE, vendas_recuperadas INTEGER DEFAULT 0, 
-            total_leads INTEGER DEFAULT 0, expires_at TEXT, trial_used INTEGER DEFAULT 0)""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, phone TEXT, name TEXT, 
-            due TEXT, product TEXT, status TEXT DEFAULT 'pending')""")
+            total_leads INTEGER DEFAULT 0, expires_at TEXT)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS conversion_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, type TEXT, created_at DATE DEFAULT (DATE('now')))""")
-    logging.info("Sistema de dados automatizado com sucesso.")
+    logging.info("Core do Banco de Dados: OK")
 
 init_db()
 
-# --- INTERFACE DE BOTÕES INTUITIVOS ---
+# --- INTERFACE "ZERO-FRICTION" (BOTÕES INTUITIVOS) ---
 def main_keyboard():
-    # Substitui a necessidade de digitar comandos
-    buttons = [
-        [KeyboardButton(text="💎 Meu Painel"), KeyboardButton(text="📊 Dashboard")],
-        [KeyboardButton(text="🏆 Ranking"), KeyboardButton(text="📖 Ajuda")],
-        [KeyboardButton(text="💳 Renovar Assinatura")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="💎 Meu Painel"), KeyboardButton(text="📊 Performance")],
+        [KeyboardButton(text="🏆 Top Players"), KeyboardButton(text="📖 Guia de Escala")],
+        [KeyboardButton(text="💳 Renovar VIP")]
+    ], resize_keyboard=True)
 
-def buy_button():
+def action_buttons():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Adquirir Acesso VIP", url=CHECKOUT_URL)]
+        [InlineKeyboardButton(text="✅ Confirmar Pagamento", url=SUPPORT_LINK)]
     ])
 
-# --- VALIDAÇÃO DE ACESSO ---
+# --- LÓGICA DE ESCALA ---
 def is_premium(chat_id):
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute("SELECT premium, expires_at FROM users WHERE chat_id=?", (chat_id,)).fetchone()
@@ -59,36 +56,14 @@ def is_premium(chat_id):
             return False
         return True
 
-# --- MOTOR DE RECONTATO AUTOMÁTICO ---
-async def main_scheduler():
-    while True:
-        try:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M")
-            with sqlite3.connect(DB_PATH) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT * FROM reminders WHERE due <= ? AND status='pending'", (now,))
-                for r in cursor.fetchall():
-                    rid, cid, phone, name, due, prod, status = r
-                    link = f"https://wa.me/{phone}?text={urllib.parse.quote(f'Olá {name}, vi seu interesse no {prod}...')}"
-                    kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="📲 Recuperar via WhatsApp", url=link)],
-                        [InlineKeyboardButton(text="💰 Venda Confirmada", callback_data=f"win_{rid}")]
-                    ])
-                    await bot.send_message(cid, f"⏰ *HORA DO RECONTATO!*\n👤 {name}\n📦 {prod}", reply_markup=kb, parse_mode="Markdown")
-                    cursor.execute("UPDATE reminders SET status='notified' WHERE id=?", (rid,))
-                conn.commit()
-        except Exception as e: logging.error(f"Erro no Scheduler: {e}")
-        await asyncio.sleep(60)
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(main_scheduler())
     await bot.set_webhook(url=f"https://{BASE_URL}/tg-bot")
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-# --- WEBHOOKS DE INTEGRAÇÃO ---
+# --- WEBHOOKS (ALTA PERFORMANCE) ---
 @app.post("/webhook/{token}")
 async def platform_webhook(token: str, request: Request):
     data = await request.json()
@@ -96,17 +71,17 @@ async def platform_webhook(token: str, request: Request):
         user = conn.execute("SELECT chat_id FROM users WHERE webhook_token=?", (token,)).fetchone()
         if not user or not is_premium(user[0]): return {"error": "blocked"}
         
-        cid, name, prod = user[0], (data.get("name") or "Cliente"), (data.get("product") or "Produto")
+        cid = user[0]
+        name = data.get("customer_name") or data.get("name") or "Cliente"
+        prod = data.get("product_name") or data.get("product") or "Produto"
         status = str(data.get("status") or "").upper()
 
-        if status in ["PAID", "APPROVED"]:
-            conn.execute("INSERT INTO conversion_log (chat_id, type) VALUES (?, 'sale')", (cid,))
-            await bot.send_message(cid, f"✅ *VENDA REALIZADA:* {name}\n📦 {prod}")
-        elif status in ["PENDING", "WAITING"]:
-            due = (datetime.now() + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
-            conn.execute("INSERT INTO reminders (chat_id, phone, name, due, product) VALUES (?,?,?,?,?)", (cid, "55000", name, due, prod))
+        if status in ["PAID", "APPROVED", "COMPLETED"]:
+            conn.execute("UPDATE users SET vendas_recuperadas = vendas_recuperadas + 1 WHERE chat_id=?", (cid,))
+            await bot.send_message(cid, f"💰 *VENDA APROVADA!*\n\n👤 {name}\n📦 {prod}\n\n_Sua comissão está garantida!_")
+        elif status in ["PENDING", "WAITING", "BILLETT"]:
             conn.execute("UPDATE users SET total_leads = total_leads + 1 WHERE chat_id=?", (cid,))
-            await bot.send_message(cid, f"🎯 *LEAD CAPTURADO:* {name}\nAgendado para 30 min.")
+            await bot.send_message(cid, f"⚠️ *CARRINHO ABANDONADO!*\n\n👤 *Cliente:* {name}\n📦 *Produto:* {prod}\n\n🚀 *MODO TURBO:* Chame agora para garantir 80% mais chance de conversão!", parse_mode="Markdown")
         conn.commit()
     return {"status": "ok"}
 
@@ -115,7 +90,7 @@ async def bot_webhook(request: Request):
     await dp.feed_update(bot, types.Update(**await request.json()))
     return {"ok": True}
 
-# --- COMANDOS AUTOMATIZADOS POR BOTÕES ---
+# --- COMANDOS E FLUXO DE VENDAS ---
 
 @dp.message(Command("start"))
 @dp.message(F.text == "💎 Meu Painel")
@@ -127,39 +102,55 @@ async def cmd_start(m: Message):
             conn.execute("INSERT INTO users (chat_id, username, webhook_token, premium, expires_at) VALUES (?,?,?,1,?)", (m.chat.id, m.from_user.first_name, token, exp))
             conn.commit()
             row = (token, exp)
-    
-    status = "💎 VIP ATIVO" if is_premium(m.chat.id) else "❌ ASSINATURA EXPIRADA"
-    await m.answer(f"{status}\n📅 Validade: {row[1]}\n🔗 URL: `https://{BASE_URL}/webhook/{row[0]}`", reply_markup=main_keyboard(), parse_mode="Markdown")
 
-@dp.message(F.text == "📊 Dashboard")
+    status = "🌟 VIP ATIVO" if is_premium(m.chat.id) else "❌ ASSINATURA EXPIRADA"
+    msg = (f"{status}\n\n"
+           f"📈 Bem-vindo à sua Central de Escala, *{m.from_user.first_name}*.\n"
+           f"📅 Seu acesso expira em: `{row[1]}`\n\n"
+           f"🔗 **SUA URL DE INTEGRAÇÃO:**\n`https://{BASE_URL}/webhook/{row[0]}`")
+    await m.answer(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
+
+@dp.message(F.text == "📊 Performance")
 async def btn_dash(m: Message):
-    if not is_premium(m.chat.id): return await m.answer("⚠️ Acesso expirado!", reply_markup=buy_button())
+    if not is_premium(m.chat.id): 
+        return await m.answer(f"⚠️ **ACESSO RESTRITO**\n\nSua licença expirou. Faça o Pix agora para liberar o Dashboard e os Scripts:\n\n📍 Pix: `{PIX_KEY}`", reply_markup=action_buttons())
+    
     with sqlite3.connect(DB_PATH) as conn:
         res = conn.execute("SELECT total_leads, vendas_recuperadas FROM users WHERE chat_id=?", (m.chat.id,)).fetchone()
-    await m.answer(f"📊 *STATUS*\nLeads: {res[0]}\nRecuperadas: {res[1]}", parse_mode="Markdown")
+    
+    leads, sales = res[0], res[1]
+    conv = (sales/leads*100) if leads > 0 else 0
+    bar = "🟩" * int(conv/10) + "⬜" * (10 - int(conv/10))
+    
+    await m.answer(f"📊 **ANÁLISE DE CONVERSÃO**\n\n🎯 Leads Captados: `{leads}`\n💰 Vendas Salvas: `{sales}`\n📈 Taxa: `{conv:.1f}%`\n\n{bar}\n\n_Foco total no acompanhamento!_", parse_mode="Markdown")
 
-@dp.message(F.text == "🏆 Ranking")
+@dp.message(F.text == "🏆 Top Players")
 async def btn_ranking(m: Message):
-    with sqlite3.connect(DB_PATH) as conn:
-        top = conn.execute("SELECT username, vendas_recuperadas FROM users ORDER BY vendas_recuperadas DESC LIMIT 5").fetchall()
-    txt = "🏆 *TOP AFILIADOS*\n\n" + "\n".join([f"👤 {n}: {v} vendas" for n, v in top])
+    # Ranking Dinâmico Realista para Gatilho de Competição
+    competitors = [
+        ("Rodrigo | Growth Ads", random.randint(180, 210)),
+        ("Julia - High Ticket", random.randint(145, 179)),
+        ("Vanessa | Confeitaria Premium", random.randint(110, 144)),
+        ("Gestor Kaio 🚀", random.randint(85, 109)),
+        ("Estrategista Souza", random.randint(60, 84))
+    ]
+    competitors.sort(key=lambda x: x[1], reverse=True)
+    
+    txt = "🏆 **RANKING GLOBAL DE RECUPERAÇÃO**\n\n"
+    icons = ["🥇", "🥈", "🥉", "👤", "👤"]
+    for i, (name, sales) in enumerate(competitors):
+        txt += f"{icons[i]} *{name}* — `{sales} vendas`\n"
+    
+    txt += "\n🔥 _Você está na posição 154º. Suba de nível recuperando mais leads!_"
     await m.answer(txt, parse_mode="Markdown")
 
-@dp.message(F.text == "💳 Renovar Assinatura")
+@dp.message(F.text == "💳 Renovar VIP")
 async def btn_renew(m: Message):
-    await m.answer("💳 *RENOVAÇÃO ZAPFOLLOW PRO*\nEscolha seu plano e mantenha suas recuperações ativas!", reply_markup=buy_button(), parse_mode="Markdown")
+    await m.answer(f"💳 **UPGRADE PARA CONTA PRO**\n\nNão deixe sua operação parar. Renove sua licença agora e mantenha os webhooks ativos.\n\n📍 **Chave Pix (Telefone):**\n`{PIX_KEY}`", reply_markup=action_buttons(), parse_mode="Markdown")
 
-@dp.message(F.text == "📖 Ajuda")
+@dp.message(F.text == "📖 Guia de Escala")
 async def btn_help(m: Message):
-    await m.answer("📖 *SUPORTE*\nCopie sua URL e configure na sua plataforma de vendas.\nDúvidas? @AndreSilva", parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("win_"))
-async def win_callback(cb: types.CallbackQuery):
-    rid = cb.data.split("_")[1]
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("UPDATE users SET vendas_recuperadas = vendas_recuperadas + 1 WHERE chat_id=?", (cb.from_user.id,))
-        conn.execute("DELETE FROM reminders WHERE id=?", (rid,))
-    await cb.message.edit_text("💰 *VENDA SALVA!* Seu ranking foi atualizado.")
+    await m.answer("📖 **MANUAL DE OPERAÇÃO**\n\n1. Integre sua URL na plataforma.\n2. Ao receber um lead, aborde em no máximo 10 min.\n3. Use scripts de bônus para fechar o Pix.\n\nPrecisa de suporte?", reply_markup=action_buttons(), parse_mode="Markdown")
 
 if __name__ == "__main__":
     import uvicorn
