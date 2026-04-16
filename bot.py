@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
+# 🔒 COLOQUE SEU ID AQUI (IMPORTANTE)
+ADMIN_ID = 123456789  # <-- TROQUE PELO SEU ID
+
+# Banco de dados
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -31,6 +35,7 @@ CREATE TABLE IF NOT EXISTS reminders (
 
 conn.commit()
 
+# Criar ou buscar usuário
 def get_user(chat_id):
     cursor.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
     user = cursor.fetchone()
@@ -40,18 +45,32 @@ def get_user(chat_id):
         return (chat_id, 0, 0)
     return user
 
+# START
 @bot.message_handler(commands=['start'])
 def start(msg):
     get_user(msg.chat.id)
-    bot.reply_to(msg, "🚀 ZapFollow Pro ativo!\nUse /lembrar")
+    bot.reply_to(msg,
+        "🚀 ZapFollow Pro\n\n"
+        "Use:\n"
+        "/lembrar telefone nome dias\n\n"
+        "Ex: /lembrar 551199999999 João 2"
+    )
 
+# VER ID
+@bot.message_handler(commands=['id'])
+def id_user(msg):
+    bot.reply_to(msg, f"🆔 Seu ID: {msg.chat.id}")
+
+# LEMBRETE
 @bot.message_handler(commands=['lembrar'])
 def lembrar(msg):
     user = get_user(msg.chat.id)
 
+    # Limite grátis
     if user[1] == 0 and user[2] >= 5:
         bot.send_message(msg.chat.id,
-            "🚫 Limite grátis atingido\n💎 Use /assinar")
+            "🚫 Limite grátis atingido\n\n"
+            "💎 Libere ilimitado com /assinar")
         return
 
     try:
@@ -76,14 +95,49 @@ def lembrar(msg):
 
         bot.reply_to(msg, f"✅ Follow-up com {name} agendado!")
 
+        # Gatilho de venda
+        bot.send_message(msg.chat.id,
+            "💡 Se isso te ajudar a fechar 1 venda, já se pagou.\n"
+            "Use /assinar para liberar ilimitado.")
+
     except:
         bot.reply_to(msg, "❌ Use: /lembrar 551199999999 Nome 2")
 
+# ASSINAR
 @bot.message_handler(commands=['assinar'])
 def assinar(msg):
     bot.send_message(msg.chat.id,
-        "💎 Premium R$19,90/mês\n\nPix: SEU_PIX\nEnvie comprovante")
+        "💎 ZapFollow Premium\n\n"
+        "✔ Lembretes ilimitados\n"
+        "✔ Nunca mais perca vendas\n\n"
+        "💰 R$19,90/mês\n\n"
+        "💳 Pix: SEU_PIX_AQUI\n\n"
+        "Após pagamento, envie o comprovante.")
 
+# LIBERAR PREMIUM (SÓ ADMIN)
+@bot.message_handler(commands=['liberar'])
+def liberar(msg):
+    if msg.chat.id != ADMIN_ID:
+        return
+
+    try:
+        parts = msg.text.split()
+        user_id = int(parts[1])
+
+        cursor.execute(
+            "UPDATE users SET premium=1 WHERE chat_id=?",
+            (user_id,)
+        )
+        conn.commit()
+
+        bot.send_message(user_id, "💎 Premium ativado!")
+
+        bot.reply_to(msg, "✅ Usuário liberado com sucesso!")
+
+    except:
+        bot.reply_to(msg, "❌ Use: /liberar ID_DO_USUARIO")
+
+# CHECK DE LEMBRETES
 def check_reminders():
     while True:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -94,7 +148,7 @@ def check_reminders():
         for r in rows:
             chat_id, phone, name = r[1], r[2], r[3]
 
-            link = f"https://wa.me/{phone}?text=Fala {name}, retomando contato."
+            link = f"https://wa.me/{phone}?text=Fala {name}, estou retomando nosso contato."
 
             bot.send_message(chat_id,
                 f"🔔 Hora do follow-up!\n👉 {link}")
@@ -106,4 +160,5 @@ def check_reminders():
 
 threading.Thread(target=check_reminders).start()
 
+print("🚀 Bot rodando...")
 bot.infinity_polling()
