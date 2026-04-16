@@ -1,1 +1,8 @@
 pyTelegramBotAPI
+fastapi
+uvicorn
+aiogram
+python-multipart
+
+
+
