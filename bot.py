@@ -9,7 +9,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(TOKEN)
 
 # 🔒 COLOQUE SEU ID AQUI (IMPORTANTE)
-ADMIN_ID = 123456789  # <-- TROQUE PELO SEU ID
+ADMIN_ID = 8449316389  # <-- TROQUE PELO SEU ID
 
 # Banco de dados
 conn = sqlite3.connect("bot.db", check_same_thread=False)
