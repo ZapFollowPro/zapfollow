@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # --- CONSTANTES ---
 TOKEN = "8614152444:AAExDqoXFSioKso4fJCSqOtdv_awYhlOj10"
 ADMIN_ID = 8449316389
-BASE_URL = os.getenv("RAILWAY_STATIC_URL", "seu-app.up.railway.app")
+BASE_URL = os.getenv("RAILWAY_STATIC_URL", "zapfollow-production.up.railway.app")
+
 DB_PATH = "zapfollow_pro.db"
 
 # --- INICIALIZAÇÃO DO BOT ---
