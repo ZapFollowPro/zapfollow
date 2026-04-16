@@ -111,7 +111,7 @@ def assinar(msg):
         "✔ Lembretes ilimitados\n"
         "✔ Nunca mais perca vendas\n\n"
         "💰 R$19,90/mês\n\n"
-        "💳 Pix: SEU_PIX_AQUI\n\n"
+        "💳 Pix: 44999648254\n\n"
         "Após pagamento, envie o comprovante.")
 
 # LIBERAR PREMIUM (SÓ ADMIN)
