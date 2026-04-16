@@ -16,38 +16,32 @@ DB_PATH = "venda_plus.db"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- INICIALIZAÇÃO SEGURA DO BANCO ---
+# --- INICIALIZAÇÃO DO BANCO ---
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-        chat_id INTEGER PRIMARY KEY, premium INTEGER DEFAULT 0, webhook_token TEXT UNIQUE,
-        vendas_recuperadas INTEGER DEFAULT 0, total_leads INTEGER DEFAULT 0,
-        expires_at TEXT, trial_used INTEGER DEFAULT 0)""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS reminders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, phone TEXT, name TEXT, 
-        due TEXT, product TEXT, status TEXT DEFAULT 'pending')""")
-    cursor.execute("""CREATE TABLE IF NOT EXISTS conversion_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, type TEXT, created_at DATE DEFAULT (DATE('now')))""")
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS users (
+            chat_id INTEGER PRIMARY KEY, premium INTEGER DEFAULT 0, webhook_token TEXT UNIQUE,
+            vendas_recuperadas INTEGER DEFAULT 0, total_leads INTEGER DEFAULT 0,
+            expires_at TEXT, trial_used INTEGER DEFAULT 0)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, phone TEXT, name TEXT, 
+            due TEXT, product TEXT, status TEXT DEFAULT 'pending')""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS conversion_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, type TEXT, created_at DATE DEFAULT (DATE('now')))""")
+    logging.info("Banco de dados pronto.")
 
 init_db()
 
-def get_user(chat_id):
+def is_premium(chat_id):
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT premium, expires_at FROM users WHERE chat_id=?", (chat_id,))
-        return cursor.fetchone()
-
-def is_premium(chat_id):
-    user = get_user(chat_id)
-    if not user or user[0] == 0: return False
-    if user[1] and datetime.now() > datetime.strptime(user[1], "%Y-%m-%d"):
-        with sqlite3.connect(DB_PATH) as conn:
+        row = cursor.fetchone()
+        if not row or row[0] == 0: return False
+        if row[1] and datetime.now() > datetime.strptime(row[1], "%Y-%m-%d"):
             conn.execute("UPDATE users SET premium = 0 WHERE chat_id=?", (chat_id,))
-        return False
-    return True
+            return False
+        return True
 
 # --- MOTOR DE AGENDAMENTO ---
 async def main_scheduler():
@@ -59,9 +53,13 @@ async def main_scheduler():
                 cursor.execute("SELECT * FROM reminders WHERE due <= ? AND status='pending'", (now,))
                 for r in cursor.fetchall():
                     rid, cid, phone, name, due, prod, status = r
-                    link = f"https://wa.me/{phone}?text={urllib.parse.quote(f'Olá {name}, vi seu interesse no {prod}... ok?')}"
-                    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📲 Recuperar", url=link)], [InlineKeyboardButton(text="💰 Venda Feita", callback_data=f"win_{rid}")]])
-                    await bot.send_message(cid, f"⏰ *FOLLOW-UP:* {name}\n📦 {prod}", reply_markup=kb, parse_mode="Markdown")
+                    msg = f"Olá {name}, vi seu interesse no {prod}. Posso te ajudar?"
+                    link = f"https://wa.me/{phone}?text={urllib.parse.quote(msg)}"
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="📲 Recuperar", url=link)],
+                        [InlineKeyboardButton(text="💰 Venda Feita", callback_data=f"win_{rid}")]
+                    ])
+                    await bot.send_message(cid, f"⏰ *HORA DO CONTATO!*\n👤 {name}\n📦 {prod}", reply_markup=kb, parse_mode="Markdown")
                     cursor.execute("UPDATE reminders SET status='notified' WHERE id=?", (rid,))
                 conn.commit()
         except Exception as e: logging.error(f"Erro Scheduler: {e}")
@@ -78,7 +76,7 @@ app = FastAPI(lifespan=lifespan)
 # --- WEBHOOKS ---
 @app.get("/webhook/{token}")
 async def validate(token: str, code: str = None, challenge: str = None):
-    return code or challenge or {"status": "ok"}
+    return code or challenge or {"status": "ativo"}
 
 @app.post("/webhook/{token}")
 async def platform_webhook(token: str, request: Request):
@@ -87,7 +85,7 @@ async def platform_webhook(token: str, request: Request):
         cursor = conn.cursor()
         cursor.execute("SELECT chat_id FROM users WHERE webhook_token=?", (token,))
         user = cursor.fetchone()
-        if not user or not is_premium(user[0]): return {"error": "unauthorized"}
+        if not user or not is_premium(user[0]): return {"error": "blocked"}
         
         cid = user[0]
         name = data.get("customer_name") or data.get("name") or "Cliente"
@@ -96,12 +94,14 @@ async def platform_webhook(token: str, request: Request):
         status = str(data.get("order_status") or data.get("status")).upper()
 
         if status in ["PAID", "APPROVED"]:
-            await bot.send_message(cid, f"✅ *VENDA:* {name}")
+            conn.execute("INSERT INTO conversion_log (chat_id, type) VALUES (?, 'sale')", (cid,))
+            await bot.send_message(cid, f"✅ *VENDA APROVADA:* {name}")
         elif status in ["PENDING", "WAITING_PAYMENT", "UNPAID"]:
             due = (datetime.now() + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M")
-            cursor.execute("INSERT INTO reminders (chat_id, phone, name, due, product) VALUES (?,?,?,?,?)", (cid, phone, name, due, prod))
-            cursor.execute("UPDATE users SET total_leads = total_leads + 1 WHERE chat_id=?", (cid,))
-            await bot.send_message(cid, f"🎯 *LEAD:* {name}\nFollow-up em 30 min.")
+            conn.execute("INSERT INTO reminders (chat_id, phone, name, due, product) VALUES (?,?,?,?,?)", (cid, phone, name, due, prod))
+            conn.execute("INSERT INTO conversion_log (chat_id, type) VALUES (?, 'lead')", (cid,))
+            conn.execute("UPDATE users SET total_leads = total_leads + 1 WHERE chat_id=?", (cid,))
+            await bot.send_message(cid, f"🎯 *LEAD CAPTURADO:* {name}\nAgendado para 30 min.")
         conn.commit()
     return {"status": "ok"}
 
@@ -115,19 +115,34 @@ async def bot_webhook(request: Request):
 async def cmd_start(m: Message):
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT webhook_token, expires_at, premium FROM users WHERE chat_id=?", (m.chat.id,))
+        cursor.execute("SELECT webhook_token, expires_at FROM users WHERE chat_id=?", (m.chat.id,))
         row = cursor.fetchone()
         if not row:
             token, exp = secrets.token_hex(8), (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
-            cursor.execute("INSERT INTO users (chat_id, webhook_token, premium, expires_at, trial_used) VALUES (?,?,1,?,1)", (m.chat.id, token, exp))
+            conn.execute("INSERT INTO users (chat_id, webhook_token, premium, expires_at, trial_used) VALUES (?,?,1,?,1)", (m.chat.id, token, exp))
             conn.commit()
-            await m.answer(f"🎁 *TESTE 3 DIAS ATIVO!*\nExpira: {exp}", parse_mode="Markdown")
-            row = (token, exp, 1)
+            await m.answer(f"🎁 *TESTE 3 DIAS ATIVO!*\nExpira: `{exp}`", parse_mode="Markdown")
+            row = (token, exp)
     
-    if is_premium(m.chat.id):
-        await m.answer(f"💎 *VIP ATIVO*\nExpira: {row[1]}\nURL: `https://{BASE_URL}/webhook/{row[0]}`", parse_mode="Markdown")
-    else:
-        await m.answer(f"❌ *EXPIRADO*\nID: `{m.chat.id}`", parse_mode="Markdown")
+    status = "💎 VIP ATIVO" if is_premium(m.chat.id) else "❌ EXPIRADO"
+    await m.answer(f"{status}\n📅 Expira: `{row[1]}`\n🔗 URL: `https://{BASE_URL}/webhook/{row[0]}`\n\n📊 `/dashboard` | 📑 `/relatorio`", parse_mode="Markdown")
+
+@dp.message(Command("relatorio"))
+async def cmd_rel(m: Message):
+    if not is_premium(m.chat.id): return
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT type, COUNT(*) FROM conversion_log WHERE chat_id=? GROUP BY type", (m.chat.id,))
+        stats = dict(cursor.fetchall())
+    l, s = stats.get('lead', 0), stats.get('sale', 0)
+    await m.answer(f"📑 *BALANÇO*\n🎯 Leads: {l}\n💰 Vendas: {s}", parse_mode="Markdown")
+
+@dp.message(Command("dashboard"))
+async def cmd_dash(m: Message):
+    if not is_premium(m.chat.id): return
+    with sqlite3.connect(DB_PATH) as conn:
+        res = conn.execute("SELECT total_leads, vendas_recuperadas FROM users WHERE chat_id=?", (m.chat.id,)).fetchone()
+    if res: await m.answer(f"📊 *DASHBOARD*\n🔥 Leads: {res[0]}\n💰 Salvas: {res[1]}", parse_mode="Markdown")
 
 @dp.message(Command("liberar"))
 async def cmd_liberar(m: Message):
@@ -138,24 +153,18 @@ async def cmd_liberar(m: Message):
         exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute("UPDATE users SET premium=1, expires_at=? WHERE chat_id=?", (exp, tid))
-        await m.answer(f"✅ ID {tid} liberado por {days} dias!")
-        await bot.send_message(tid, f"🔥 *VIP LIBERADO!* Expira em: {exp}")
+        await m.answer(f"✅ ID {tid} liberado até {exp}")
+        await bot.send_message(tid, f"🔥 *VIP ATIVADO!* Válido até {exp}")
     except: await m.answer("Use: `/liberar ID DIAS`")
-
-@dp.message(Command("dashboard"))
-async def cmd_dash(m: Message):
-    with sqlite3.connect(DB_PATH) as conn:
-        res = conn.execute("SELECT total_leads, vendas_recuperadas FROM users WHERE chat_id=?", (m.chat.id,)).fetchone()
-    if res:
-        await m.answer(f"📊 *STATUS*\nLeads: {res[0]}\nRecuperadas: {res[1]}", parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("win_"))
 async def win(cb: types.CallbackQuery):
     rid = cb.data.split("_")[1]
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("UPDATE users SET vendas_recuperadas = vendas_recuperadas + 1 WHERE chat_id=?", (cb.from_user.id,))
+        conn.execute("INSERT INTO conversion_log (chat_id, type) VALUES (?, 'sale')", (cb.from_user.id,))
         conn.execute("DELETE FROM reminders WHERE id=?", (rid,))
-    await cb.message.edit_text("💰 *SALVA!*")
+    await cb.message.edit_text("💰 *VENDA SALVA!*")
 
 if __name__ == "__main__":
     import uvicorn
