@@ -60,7 +60,7 @@ async def main_scheduler():
                 for r in expired:
                     rid, chat_id, phone, name, due, product, status = r
                     
-                    # Mensagem de Persuasão para o Cliente Final (WhatsApp)
+                    # Mensagem corrigida (sem conflito de aspas)
                     copy = (
                         f"Olá {name}, tudo bem? Vi que você selecionou o {product}, mas o sistema ainda não reconheceu o pagamento. "
                         "Separei sua unidade aqui, mas como a procura está alta, não consigo segurar por muito tempo. "
@@ -78,7 +78,7 @@ async def main_scheduler():
                         f"⚠️ *ALERTA DE DINHEIRO NA MESA!*\n\n"
                         f"👤 Cliente: *{name}*\n"
                         f"📦 Produto: *{product}*\n\n"
-                        f"O lead já está "aquecido". Clique abaixo para finalizar a venda antes que ele desista!", 
+                        f"O lead já está 'aquecido'. Clique abaixo para finalizar a venda antes que ele desista!", 
                         reply_markup=kb, 
                         parse_mode="Markdown"
                     )
@@ -227,7 +227,3 @@ async def mark_win(callback: types.CallbackQuery):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
-
-
-
